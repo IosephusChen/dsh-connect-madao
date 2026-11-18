@@ -8,6 +8,33 @@
  * 因此这里做「宽容解析」：优先识别 OpenAI 形状，其次识别 ai-sdk 形状。
  */
 
+/**
+ * 上游用量信息。
+ *
+ * **必须整体保留，不能只挑三个数字。**
+ *
+ * 踩过的坑：早期只提取 prompt/completion/total 三个字段，把
+ * `prompt_tokens_details.cached_tokens` 和
+ * `completion_tokens_details.reasoning_tokens` 整个丢掉了。
+ * 结果 DSH 的 Token 用量面板永远显示「缓存命中 0%、缓存读取 0」，
+ * 而实际上网关是**有前缀缓存**的 —— 实测同一个 1834 token 的请求，
+ * 其中 1024 来自缓存（约 56%），只是这个数字没被转发上去。
+ *
+ * 缓存不仅影响显示，通常还影响计费（cached 部分按折扣价），
+ * 所以这四个字段一个都不能少。
+ */
+export interface UsageInfo {
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  /** 例：{ cached_tokens: 1024 } */
+  prompt_tokens_details?: Record<string, unknown>
+  /** 例：{ reasoning_tokens: 55 } */
+  completion_tokens_details?: Record<string, unknown>
+  /** 兼容其他实现可能用的平铺字段名 */
+  [key: string]: unknown
+}
+
 export interface OpenAIDelta {
   role?: string
   content?: string
@@ -33,11 +60,7 @@ export interface OpenAIChunk {
     delta: OpenAIDelta
     finish_reason: string | null
   }>
-  usage?: {
-    prompt_tokens: number
-    completion_tokens: number
-    total_tokens: number
-  }
+  usage?: UsageInfo
 }
 
 export function makeChunk(
@@ -71,7 +94,7 @@ export interface ParsedEvent {
   /** 结束原因 */
   finish?: string
   /** 用量 */
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+  usage?: UsageInfo
   /** 是否收到结束信号 */
   done?: boolean
   /** 原始对象，供调试 */
@@ -102,11 +125,9 @@ export function parseUpstreamEvent(data: string): ParsedEvent {
 
     // usage 可能出现在 choices:[] 的独立帧里（码道就是这样发的）
     if (obj.usage) {
-      out.usage = {
-        prompt_tokens: obj.usage.prompt_tokens ?? 0,
-        completion_tokens: obj.usage.completion_tokens ?? 0,
-        total_tokens: obj.usage.total_tokens ?? 0,
-      }
+      // 整体保留，含 prompt_tokens_details.cached_tokens 等
+      // —— 只挑三个数字会让上层永远看到「缓存 0%」
+      out.usage = { ...obj.usage }
     }
 
     const ch = obj.choices[0]
@@ -138,7 +159,9 @@ export function parseUpstreamEvent(data: string): ParsedEvent {
   if (type === 'finish' || type === 'finish-step') {
     out.finish = obj.finishReason ?? obj.finish_reason ?? 'stop'
     if (obj.usage) {
+      // 同样整体保留：这里即便字段名是驼峰，也要把 details 带出去
       out.usage = {
+        ...obj.usage,
         prompt_tokens: obj.usage.promptTokens ?? obj.usage.prompt_tokens ?? 0,
         completion_tokens: obj.usage.completionTokens ?? obj.usage.completion_tokens ?? 0,
         total_tokens: obj.usage.totalTokens ?? obj.usage.total_tokens ?? 0,
@@ -159,3 +182,4 @@ export function parseUpstreamEvent(data: string): ParsedEvent {
 
   return out
 }
+

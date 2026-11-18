@@ -115,6 +115,18 @@ export function buildUpstreamBody(req: ChatRequestBody, overrides: Partial<ChatR
     messages: messages as OpenAIMessage[],
     max_tokens: req.max_tokens ?? DEFAULT_MAX_TOKENS,
     stream: true,
+    // stream_options 必须转发。
+    //
+    // 踩过的坑：这里按白名单重建请求体，把 DSH 传来的
+    // `stream_options: { include_usage: true }` 删掉了。而网关只有在
+    // 带这个字段时才返回**完整** usage —— 不带就只给
+    // prompt/completion/total 三个数字，不含
+    // `prompt_tokens_details.cached_tokens`。
+    //
+    // 后果：DSH 的 Token 用量面板永远显示「缓存命中 0%、缓存读取 0」，
+    // 而实际上缓存是工作的（实测同一个 2434 token 的请求，其中 2304
+    // 来自缓存，约 95%），只是数字没被返回上来。
+    ...(req.stream_options ? { stream_options: req.stream_options } : {}),
     ...(typeof req.temperature === 'number' ? { temperature: req.temperature } : {}),
     ...(typeof req.top_p === 'number' ? { top_p: req.top_p } : {}),
     ...(req.stop ? { stop: req.stop } : {}),

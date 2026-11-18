@@ -9,7 +9,7 @@
  * 只监听 127.0.0.1。
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -616,6 +616,16 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
   const msgBrief = (rb.messages ?? [])
     .map((m: any) => `${m.role}:${typeof m.content === 'string' ? m.content.length : Array.isArray(m.content) ? 'arr' + m.content.length : typeof m.content}`)
     .join(',')
+  // 前缀指纹：缓存是按 token 前缀匹配的，长度相同不代表内容相同。
+  // 记录第一条 system 的 sha256 前 8 位，对比两次请求就能看出前缀是否稳定 ——
+  // 指纹一致却没命中，才是网关的问题；指纹变了，就是上游 prompt 在变。
+  const prefixMsg = (rb.messages ?? []).find((m: any) => m.role === 'system' || m.role === 'developer')
+  const sysHash = prefixMsg
+    ? createHash('sha256')
+        .update(typeof prefixMsg.content === 'string' ? prefixMsg.content : JSON.stringify(prefixMsg.content))
+        .digest('hex')
+        .slice(0, 8)
+    : 'none'
   chatLog(
     `chat in=${JSON.stringify(String(rawBody.model ?? ''))} → out=${JSON.stringify(model)}` +
       ` strength=${JSON.stringify(body.strength ?? null)}` +
@@ -623,6 +633,7 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
       ` → 实际发给网关=${(upstreamBody as any).max_tokens}` +
       ` stream=${wantStream} est_tokens=${estTokens}` +
       ` msgs=[${msgBrief}] tools=${Array.isArray(rb.tools) ? rb.tools.length : 0}` +
+      ` sysHash=${sysHash}` +
       ` 顶层字段=${Object.keys(rb).join('|')}`,
   )
 
@@ -688,7 +699,7 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
     }
     chatLog(
       `chat done model=${model} content_len=${text.length} reasoning_len=${reasoning.length}` +
-        ` tool_calls=${mergedCalls.length} finish=${finish ?? 'stop'}` +
+        ` tool_calls=${mergedCalls.length} cached=${(usage as any)?.prompt_tokens_details?.cached_tokens ?? 0}/${usage?.prompt_tokens ?? 0} finish=${finish ?? 'stop'}` +
         (text.length === 0 && mergedCalls.length === 0 ? '  ⚠ content 为空且无工具调用' : ''),
     )
     markIdle()
@@ -767,6 +778,12 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
     `chat done stream model=${model} finish=${finish ?? 'stop'}` +
       ` content=${contentChars}(${textEvents}段) reasoning=${reasoningChars}(${reasoningEvents}段)` +
       ` tool_calls=${toolCallEvents}帧` +
+      // cached/prompt：网关只在**真的命中前缀缓存**时才返回 cached_tokens，
+      // 所以这行是判断缓存是否生效的唯一依据。配合请求行的 sysHash 看：
+      //   sysHash 相同 + cached>0  → 缓存正常
+      //   sysHash 相同 + cached=0  → 网关那边没命中，值得反馈
+      //   sysHash 每次都变          → 是上游 prompt 在变，不是插件的问题
+      ` cached=${(usage as any)?.prompt_tokens_details?.cached_tokens ?? 0}/${usage?.prompt_tokens ?? 0}` +
       // 有工具调用时 content 为空是正常的（模型在调工具，不是产文本），不能报"空响应"
       (contentChars === 0 && toolCallEvents === 0
         ? reasoningChars === 0
@@ -1009,6 +1026,8 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) })
   res.end(body)
 }
+
+
 
 
 
