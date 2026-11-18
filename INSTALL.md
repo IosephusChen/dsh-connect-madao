@@ -199,7 +199,7 @@ $env:MADAO_SK="kDls..."
 ✓ 积分额度
 ```
 
-模型选择器里会多出「码道 CodeArts」一组，共 11 个模型。
+模型选择器里会多出「码道 CodeArts」一组，共 12 个模型。
 
 ---
 
@@ -277,6 +277,7 @@ IAM 换 STS 太频繁被限流。等约 1 分钟。插件已做缓存和提前�
 插件列表里关掉开关，或从 profile 的 `dependencies` 移除 `dsh-connect-madao`。
 
 凭证文件 `%USERPROFILE%\.dsh-connect-madao\` 可以一并删掉。
+
 
 
 

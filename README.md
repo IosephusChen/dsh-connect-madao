@@ -107,7 +107,7 @@ node lib/bin.js serve --port 8765
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/v1/chat/completions` | 对话，支持 `stream` |
-| GET | `/v1/models` | 11 个模型 |
+| GET | `/v1/models` | 12 个模型 |
 | GET | `/healthz` | 自检：凭证 / STS / 密钥协商 |
 
 ---
@@ -163,10 +163,14 @@ lib/              构建产物
 
 - **思考强度已生效**（0.5.1 起）：网关认的是 **`reasoning_effort`**，不是 `strength`。
   之前一直发 `strength`，网关当未知字段忽略，所以界面上换档位毫无效果 ——
-  这也是当时误判成"完全不支持"的原因。实测（GLM-5.2，同一道题各跑 3 次取平均）：
-  `high` → reasoning 1014 字，不传 → 1254 字，`max` → 1323 字；组内 σ≈75，
-  组间差 240 / 69，统计上确认生效。`off` 走网关的 `none`。
-  注意幅度有限：`max` 只比默认多约 5%，真正有明显差别的是 `high`（比默认少约 19%）。
+  这也是当时误判成「完全不支持」的原因。`off` 走网关的 `none`。
+
+  档位由网关动态下发，码道 26.11.200 起从 2 个模型扩到 8 个：
+  - `GLM-5.2` / `GLM-5.2-ArkTS-SPARK`：`high` / `max`（梯度小，`max` 仅比默认多约 5%）
+  - `GLM-5.3` / `GLM-5.3-Flash` / `DeepSeek-V4.1-Flash`(含 1017) / `Kimi-K3`(含 3.1-Pro)：
+    `low` / `high` / `max`（梯度明显：295 → 330 → 684 字）
+
+  插件每次启动重新拉取档位列表，`cordis.patch.yml` 随之刷新。
 - **工具调用（tool_calls）已支持**（0.4.1 起）：早期版本只转发 `content` 和
   `reasoning_content`，把 `tool_calls` 帧整个丢掉了。表现是 `finish_reason: "tool_calls"`
   但 `content` 为空，客户端只看到「有思考、没内容」，于是判定异常并中断 ——
@@ -223,6 +227,7 @@ lib/              构建产物
 ## 侦察记录
 
 见 [`../RECON.md`](../RECON.md)。
+
 
 
 
