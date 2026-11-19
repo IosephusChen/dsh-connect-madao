@@ -596,6 +596,7 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
   // 没有 tools 时直接记 0 —— estimateTokens([]) 会把 "[]" 这两个字符也算出来
   const estTools = toolCount > 0 ? estimateTokens((rawBody as any).tools) : 0
   const estTokens = estMessages + estTools
+
   if (info && info.context > 0) {
     // 闸门放在窗口的 1.2 倍，而不是 0.9 倍。
     //
@@ -1057,6 +1058,7 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) })
   res.end(body)
 }
+
 
 
 
