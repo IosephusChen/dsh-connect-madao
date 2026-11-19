@@ -644,21 +644,31 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
   }
 
   if (info && info.context > 0) {
-    // 闸门放在窗口的 1.2 倍，而不是 0.9 倍。
+    // 闸门 = 真实输入上限 × 1.2
     //
-    // 原因：估算没有 tokenizer，实测偏差 1.15–2.0×（内容越重复、英文越多，偏差越大）。
-    // 曾经按 0.9 倍拦，结果 GLM-5.2 的 377 工具请求被误判为超限，但用网关官方计数
-    // 复核只有 172491 tokens（窗口 202752），本来完全能跑。
+    // 两个关键修正：
     //
-    // 两害相权：误拦会让模型彻底不可用，漏拦只是网关返回空内容 —— 而空响应现在
-    // 会被日志标记，且请求体落盘可复查。所以宁可放松。
-    const limit = Math.floor(info.context * 1.2)
+    // 1) **不能用 context_window**。网关的 `context_window` 比真实可用的
+    //    `max input length` 大 4096，那部分是给输出预留的。实测：
+    //      glm-5.2-sft-harmony  context_window=202752  真实上限=196608
+    //      deepseek-v4.1-flash  context_window=1048576 真实上限=1044480
+    //    按 context_window 算闸门，会让超限请求一路放行到网关，
+    //    用户只看到 `81001.400 Prompt length exceeds`。
+    //
+    // 2) 系数保持 1.2（估算没有 tokenizer，实测偏差 1.15–2.0×）。
+    //    曾经按 0.9 倍拦，结果 GLM-5.2 的 377 工具请求被误判为超限，
+    //    但网关官方计数只有 172491（窗口 202752），完全能跑。
+    //    两害相权：漏拦只是网关报错（现在错误已经很清楚），
+    //    误拦会让模型彻底不可用。
+    const RESERVED_FOR_OUTPUT = 4096
+    const realInputLimit = Math.max(1, info.context - RESERVED_FOR_OUTPUT)
+    const limit = Math.floor(realInputLimit * 1.2)
     if (estTokens > limit) {
       const bigger = ctxModels
-        .filter((m) => m.context * 0.9 > estTokens)
+        .filter((m) => m.context - RESERVED_FOR_OUTPUT > estTokens)
         .sort((a, b) => a.context - b.context)
         .slice(0, 4)
-        .map((m) => `${m.name}（${m.context}）`)
+        .map((m) => `${m.name}（${m.context - RESERVED_FOR_OUTPUT}）`)
       chatLog(
         `chat REJECT context ${estTokens} (msgs ${estMessages} + tools ${estTools}/${toolCount}) > ${limit} for ${model}`,
       )

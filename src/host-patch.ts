@@ -40,18 +40,29 @@ function displayName(m: ModelInfo): string {
  * `CONTEXT_WINDOW_EXCEEDED`，请求根本不会发到桥接。
  *
  * 问题在于它的估算把 `tools` 的 JSON schema 按接近 1 token/字符来算，
- * 而那是英文+JSON 为主的内容，真实只有 1/3 左右。DSH 自带 377 个工具，
- * 光 tools 就被估成 20 多万 token —— 于是 202752 的 GLM-5.2 永远被判超限，
- * 但实测同一个请求（228 KB）打到码道网关是能正常返回的。
+ * 而那是英文+JSON 为主的内容，真实只有 1/3 左右。DSH 自带几百个工具，
+ * 光 tools 就被估成十几二十万 token —— 于是 202752 的 GLM-5.2 被判超限，
+ * 但实测同一个请求打到码道网关是能正常返回的。
  *
- * 所以这里给 DSH 报一个放宽后的窗口：它按虚高的数字放行，
- * 而真正防超限的检查留在桥接里（用网关给的真实 contextWindow 判断）。
+ * ── 系数为什么从 2.5 降到 1.6 ──────────────────────────────
+ *
+ * 2.5 太大了，副作用很实际：
+ *   · 界面显示 GLM-5.2 是 495K，用户以为能装下 330K 的会话
+ *   · 实际网关只接受 196608，于是撞上
+ *     `81001.400 Prompt length exceeds 196608`
+ *   · DSH 的自动压缩也按这个大窗口算，压不到真正需要的程度，
+ *     于是「压缩失败」
+ *
+ * 1.6 足够抵消 tools 的虚高（实测偏差 1.15–2.0×，取中位），
+ * 又不会把显示值吹到离谱。真正防超限的检查留在桥接里（用网关的
+ * 真实 context_window − 4096 判断），不依赖这个显示值。
  */
-const CONTEXT_DISPLAY_FACTOR = 2.5
+const CONTEXT_DISPLAY_FACTOR = 1.6
 
 function displayContextWindow(real: number): number {
   if (!Number.isFinite(real) || real <= 0) return real
-  return Math.round(real * CONTEXT_DISPLAY_FACTOR)
+  // 至少保留真实值，绝不低于它 —— 否则 DSH 会把能跑的请求也拦掉
+  return Math.max(real, Math.round(real * CONTEXT_DISPLAY_FACTOR))
 }
 
 function renderModel(m: ModelInfo): string {
