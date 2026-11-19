@@ -61,6 +61,34 @@ test('normalizeContent: 空数组返回空字符串', () => {
   assert.equal(normalizeContent([]), '')
 })
 
+// ── 单个 part 对象：不能静默丢弃 ──────────────────────────────
+// 踩过的坑：DSH 会产出 content 为单个对象的 assistant 消息（日志显示 assistant:object），
+// 早期实现走 `if (!Array.isArray(content)) return ''`，把整段内容清空。
+// 实测 content:null 原样发给网关会让它返回空响应（有 usage 但无内容），
+// 而 content:"" 正常 —— 所以 null→"" 是对的，但 object 必须解析出来。
+
+test('normalizeContent: null 转成空字符串（不能透传 null）', () => {
+  assert.equal(normalizeContent(null), '')
+  assert.equal(normalizeContent(undefined), '')
+})
+
+test('normalizeContent: 单个 text part 对象要提取文本', () => {
+  const got = normalizeContent({ type: 'text', text: '对象形式的文本' })
+  assert.equal(got, '对象形式的文本')
+})
+
+test('normalizeContent: 单个 image_url part 对象要保留', () => {
+  const got = normalizeContent({ type: 'image_url', image_url: { url: 'data:image/png;base64,BB' } })
+  assert.ok(Array.isArray(got))
+  assert.equal((got as any[])[0].type, 'image_url')
+})
+
+test('normalizeContent: 不认识的 object 序列化兜底，不丢内容', () => {
+  const got = normalizeContent({ foo: 'bar' })
+  assert.equal(typeof got, 'string')
+  assert.ok((got as string).includes('foo'))
+})
+
 // ── hasUnsupportedContent：只拒绝网关不认的类型 ────────────────
 
 test('hasUnsupportedContent: text 与 image_url 都算支持', () => {
@@ -162,4 +190,41 @@ test('parseUpstreamEvent: choices:[] 的独立 usage 帧', () => {
 test('parseUpstreamEvent: 非法 JSON 不抛错', () => {
   const ev = parseUpstreamEvent('{不是 json')
   assert.deepEqual(ev, {})
+})
+
+// ── 网关错误帧必须被识别 ─────────────────────────────────────
+// 踩过的坑：码道的错误不是 OpenAI 的 {error:{...}}，而是塞在一条看似结束的帧里：
+//   {"text":"[DONE]","error_code":"InferHub.ModelArts.81001.400",
+//    "error_msg":"the content of image_url.url field is unsafe"}
+// 早期只认 [DONE]，把真实错误当正常结束吞掉，上层只看到 EMPTY_RESPONSE。
+
+test('parseUpstreamEvent: 识别网关的 error_code 帧', () => {
+  const ev = parseUpstreamEvent(
+    JSON.stringify({
+      text: '[DONE]',
+      error_code: 'InferHub.ModelArts.81001.400',
+      error_msg: 'the content of image_url.url field is unsafe',
+    }),
+  )
+  assert.ok(ev.error, '必须提取出 error')
+  assert.equal(ev.error!.code, 'InferHub.ModelArts.81001.400')
+  assert.equal(ev.error!.message, 'the content of image_url.url field is unsafe')
+  assert.equal(ev.done, true)
+})
+
+test('parseUpstreamEvent: 识别 OpenAI 形状的 error 帧', () => {
+  const ev = parseUpstreamEvent(
+    JSON.stringify({ error: { code: 'rate_limit', message: 'too many requests' } }),
+  )
+  assert.ok(ev.error)
+  assert.equal(ev.error!.code, 'rate_limit')
+  assert.equal(ev.error!.message, 'too many requests')
+})
+
+test('parseUpstreamEvent: 正常帧不应被误判成错误', () => {
+  const ev = parseUpstreamEvent(
+    JSON.stringify({ choices: [{ delta: { content: 'hello' }, finish_reason: null }] }),
+  )
+  assert.equal(ev.error, undefined)
+  assert.equal(ev.text, 'hello')
 })

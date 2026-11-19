@@ -51,18 +51,45 @@ const DEFAULT_MAX_TOKENS = 65536
  * 也就是说码道网关走的是**标准 OpenAI image_url**，所以这里原样保留它，
  * 只把网关不认识的其他 part（音频、file 等）丢掉。
  */
+/** 把单个 content part 转成网关认识的形式；不认识的返回 null。 */
+function normalizePart(raw: any): { type: string } | null {
+  if (!raw || typeof raw !== 'object') return null
+  if (raw.type === 'text' && typeof raw.text === 'string') {
+    return { type: 'text', text: raw.text }
+  }
+  if (raw.type === 'image_url' && raw.image_url?.url) {
+    return { type: 'image_url', image_url: { url: String(raw.image_url.url) } }
+  }
+  return null
+}
+
 export function normalizeContent(content: unknown): string | Array<{ type: string }> {
   if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
+
+  // null 显式转成空字符串。
+  // 实测：把 content:null 原样发给网关会让它返回空响应（有 usage 但无内容），
+  // 而 content:"" 正常。所以这里不能透传 null。
+  if (content === null || content === undefined) return ''
+
+  // 单个 part 对象（非数组）。
+  // DSH 会产出这种形态（日志里显示成 assistant:object），早期实现直接返回 ''，
+  // 把整段内容丢掉了 —— 那会导致模型上下文缺一块，进而返回空响应。
+  if (!Array.isArray(content)) {
+    const single = normalizePart(content)
+    if (single) return (single as any).type === 'text' ? (single as any).text : [single]
+    // 完全不认识的形状：序列化兜底，宁可让网关自己判，也不要静默丢内容
+    try {
+      const s = JSON.stringify(content)
+      return s && s !== '{}' ? s : ''
+    } catch {
+      return ''
+    }
+  }
 
   const parts: Array<{ type: string }> = []
   for (const raw of content as any[]) {
-    if (!raw || typeof raw !== 'object') continue
-    if (raw.type === 'text' && typeof raw.text === 'string') {
-      parts.push({ type: 'text', text: raw.text })
-    } else if (raw.type === 'image_url' && raw.image_url?.url) {
-      parts.push({ type: 'image_url', image_url: { url: String(raw.image_url.url) } })
-    }
+    const p = normalizePart(raw)
+    if (p) parts.push(p)
   }
 
   // 空数组返回空字符串：上游期待字符串，给它 [] 反而可能被判非法

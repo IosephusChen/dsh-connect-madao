@@ -597,6 +597,8 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
   const estTools = toolCount > 0 ? estimateTokens((rawBody as any).tools) : 0
   const estTokens = estMessages + estTools
 
+
+
   if (info && info.context > 0) {
     // 闸门放在窗口的 1.2 倍，而不是 0.9 倍。
     //
@@ -726,6 +728,15 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
           mergedCalls[idx] = cur
         }
       }
+      // 网关的内容审核/参数错误会以 error_code 形式塞进一条 [DONE] 帧。
+      // 不识别它就只能看到"有结束信号但没内容"，上层报 EMPTY_RESPONSE。
+      if (ev.error) {
+        chatLog(`chat UPSTREAM_ERROR model=${model} code=${ev.error.code} msg=${ev.error.message.slice(0, 200)}`)
+        markIdle()
+        return json(res, 400, {
+          error: { message: `${ev.error.message}（${ev.error.code}）`, type: 'upstream_error', code: ev.error.code },
+        })
+      }
       if (ev.finish) finish = ev.finish
       if (ev.usage) usage = ev.usage
     }
@@ -773,6 +784,8 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
   let textEvents = 0
   let reasoningEvents = 0
   let toolCallEvents = 0
+  /** 上游以 error_code 帧报的错（如内容审核拦截），非空表示本轮失败 */
+  let upstreamErrorMessage = ''
   try {
     for await (const ev of events()) {
       if (ev.reasoning) {
@@ -791,6 +804,19 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
       if (ev.toolCalls) {
         toolCallEvents++
         res.write(sseLine(makeChunk(id, model, { tool_calls: ev.toolCalls })))
+      }
+      // 网关的内容审核/参数错误会以 error_code 形式塞进一条 [DONE] 帧。
+      // 必须转成明确的 SSE 错误帧，否则用户只看到 EMPTY_RESPONSE，
+      // 完全不知道是图片被内容审核拦了还是别的原因。
+      if (ev.error) {
+        chatLog(`chat stream UPSTREAM_ERROR model=${model} code=${ev.error.code} msg=${ev.error.message.slice(0, 200)}`)
+        res.write(
+          sseLine({
+            error: { message: `${ev.error.message}（${ev.error.code}）`, type: 'upstream_error', code: ev.error.code },
+          }),
+        )
+        upstreamErrorMessage = ev.error.message
+        break
       }
       if (ev.finish) finish = ev.finish
       if (ev.usage) usage = ev.usage
@@ -1058,6 +1084,8 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) })
   res.end(body)
 }
+
+
 
 
 

@@ -97,6 +97,19 @@ export interface ParsedEvent {
   usage?: UsageInfo
   /** 是否收到结束信号 */
   done?: boolean
+  /**
+   * 上游明确报错。
+   *
+   * 码道网关的错误**不是** OpenAI 的 `{error:{...}}` 形状，而是塞在
+   * 一条看起来像结束帧的数据里：
+   *
+   *   {"text":"[DONE]","error_code":"InferHub.ModelArts.81001.400",
+   *    "error_msg":"the content of image_url.url field is unsafe"}
+   *
+   * 早期解析层只认 `[DONE]`，把这条当成正常结束 —— 于是上层看到的是
+   * "有完成信号但没内容"，最终报 EMPTY_RESPONSE，完全看不出是内容审核拦了。
+   */
+  error?: { code: string; message: string }
   /** 原始对象，供调试 */
   raw?: unknown
 }
@@ -118,6 +131,25 @@ export function parseUpstreamEvent(data: string): ParsedEvent {
   }
 
   const out: ParsedEvent = { raw: obj }
+  // ── 网关自己的错误帧 ─────────────────────────────────────
+  // 形状：{"text":"[DONE]","error_code":"...","error_msg":"..."}
+  // 必须先于 OpenAI 形状判断：这种帧没有 choices，但带 text:"[DONE]"，
+  // 若按结束处理就会把真实错误吞掉，上层只看到空响应。
+  if (typeof obj.error_code === 'string' && obj.error_code) {
+    return {
+      raw: obj,
+      error: { code: obj.error_code, message: String(obj.error_msg ?? obj.error_message ?? '') },
+      done: true,
+    }
+  }
+  if (obj.error && typeof obj.error === 'object' && !Array.isArray(obj.choices)) {
+    return {
+      raw: obj,
+      error: { code: String(obj.error.code ?? obj.error.type ?? 'upstream_error'), message: String(obj.error.message ?? '') },
+      done: true,
+    }
+  }
+
 
   // ── OpenAI 形状 ──────────────────────────────────────────
   if (Array.isArray(obj.choices)) {
