@@ -57,7 +57,7 @@ function displayName(m: ModelInfo): string {
  * 又不会把显示值吹到离谱。真正防超限的检查留在桥接里（用网关的
  * 真实 context_window − 4096 判断），不依赖这个显示值。
  */
-const CONTEXT_DISPLAY_FACTOR = 1.6
+const CONTEXT_DISPLAY_FACTOR = 1.0
 
 function displayContextWindow(real: number): number {
   if (!Number.isFinite(real) || real <= 0) return real
@@ -145,3 +145,4 @@ export function syncPatch(path: string, models: ModelInfo[]): SyncResult {
     return { changed: false, path, models: models.length, error: String((e as Error)?.message ?? e) }
   }
 }
+
