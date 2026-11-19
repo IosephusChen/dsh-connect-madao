@@ -627,7 +627,12 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
       .slice(0, 4)
       .map((m) => `${m.name}（${m.context}）`)
 
-    return json(res, 400, {
+    // 413 Payload Too Large，不是 400。
+    // 语义上这是"客户端发了太多"，不是"参数写错了"。DSH 对 413 的处理
+    // 是当成容量问题（可以触发压缩或提示用户开新会话），对 400 则当参数
+    // 错误——后者会让人去查配置，方向完全错。
+    // 参考 dsh-connect-workbuddy 的同类处理：它也用 413 + request_too_large。
+    return json(res, 413, {
       error: {
         message:
           `当前会话的请求体 ${mb} MB，超过码道网关约 10 MB 的单次上限。\n` +
