@@ -597,7 +597,51 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
   const estTools = toolCount > 0 ? estimateTokens((rawBody as any).tools) : 0
   const estTokens = estMessages + estTools
 
+  // ── 请求体体积守卫 ──────────────────────────────────────────
+  //
+  // 网关对**单次请求体**有约 10 MB 的硬上限，超了只会返回一条
+  // 语焉不详的 `InferHub.001001005.400 The request param is invalid`，
+  // 完全不说是体积问题，极难排查。
+  //
+  // 实测边界（同一个真实会话，逐步增加消息数）：
+  //   345 条  9.45 MB  → ✓ 正常
+  //   347 条 10.24 MB  → ✗ 001001005
+  //
+  // 这个限制插件突破不了（body 由 DSH 给），但可以提前拦住并说清原因，
+  // 免得用户对着"参数无效"瞎猜。阈值取 9.5 MB，留一点余量。
+  const BODY_LIMIT_BYTES = 9.5 * 1024 * 1024
+  let bodyBytes = 0
+  try {
+    bodyBytes = Buffer.byteLength(JSON.stringify(upstreamBody), 'utf8')
+  } catch {
+    bodyBytes = 0
+  }
+  if (bodyBytes > BODY_LIMIT_BYTES) {
+    const mb = (bodyBytes / 1024 / 1024).toFixed(2)
+    const toolCountForMsg = Array.isArray((rawBody as any).tools) ? (rawBody as any).tools.length : 0
+    const msgCount = Array.isArray(rawBody.messages) ? rawBody.messages.length : 0
+    chatLog(`chat REJECT body ${mb}MB (msgs ${msgCount} + tools ${toolCountForMsg}) > 9.5MB for ${model}`)
 
+    const smaller = ctxModels
+      .filter((m) => m.context <= 262144)
+      .slice(0, 4)
+      .map((m) => `${m.name}（${m.context}）`)
+
+    return json(res, 400, {
+      error: {
+        message:
+          `当前会话的请求体 ${mb} MB，超过码道网关约 10 MB 的单次上限。\n` +
+          `这不是配置问题，网关会返回「参数无效」而不说是体积超了。\n\n` +
+          `怎么解决（任选其一）：\n` +
+          `  1. 开新会话，把需要延续的结论复制过去 —— 最直接\n` +
+          `  2. 换成窗口更小的模型，让 DSH 更早压缩历史` +
+          (smaller.length ? `：${smaller.join('、')}` : '') +
+          `\n  3. 检查会话里有没有大图片，它们的 base64 占体积最多\n\n` +
+          `当前：${msgCount} 条消息 + ${toolCountForMsg} 个工具定义`,
+        type: 'request_too_large',
+      },
+    })
+  }
 
   if (info && info.context > 0) {
     // 闸门放在窗口的 1.2 倍，而不是 0.9 倍。
@@ -737,10 +781,6 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
           error: { message: `${ev.error.message}（${ev.error.code}）`, type: 'upstream_error', code: ev.error.code },
         })
       }
-      // 【临时诊断】记录 finish 为非 stop/tool_calls/length 的原始帧
-      if (ev.finish && !['stop','tool_calls','length'].includes(String(ev.finish)) && process.env.MADAO_DUMP_FRAMES === '1') {
-        chatLog('RAW_FINISH ' + JSON.stringify(ev.raw).slice(0, 600))
-      }
       if (ev.finish) finish = ev.finish
       if (ev.usage) usage = ev.usage
     }
@@ -821,10 +861,6 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
         )
         upstreamErrorMessage = ev.error.message
         break
-      }
-      // 【临时诊断】记录 finish 为非 stop/tool_calls/length 的原始帧
-      if (ev.finish && !['stop','tool_calls','length'].includes(String(ev.finish)) && process.env.MADAO_DUMP_FRAMES === '1') {
-        chatLog('RAW_FINISH ' + JSON.stringify(ev.raw).slice(0, 600))
       }
       if (ev.finish) finish = ev.finish
       if (ev.usage) usage = ev.usage
@@ -1092,6 +1128,7 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) })
   res.end(body)
 }
+
 
 
 
