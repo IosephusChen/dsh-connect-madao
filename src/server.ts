@@ -737,6 +737,10 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
           error: { message: `${ev.error.message}（${ev.error.code}）`, type: 'upstream_error', code: ev.error.code },
         })
       }
+      // 【临时诊断】记录 finish 为非 stop/tool_calls/length 的原始帧
+      if (ev.finish && !['stop','tool_calls','length'].includes(String(ev.finish)) && process.env.MADAO_DUMP_FRAMES === '1') {
+        chatLog('RAW_FINISH ' + JSON.stringify(ev.raw).slice(0, 600))
+      }
       if (ev.finish) finish = ev.finish
       if (ev.usage) usage = ev.usage
     }
@@ -817,6 +821,10 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
         )
         upstreamErrorMessage = ev.error.message
         break
+      }
+      // 【临时诊断】记录 finish 为非 stop/tool_calls/length 的原始帧
+      if (ev.finish && !['stop','tool_calls','length'].includes(String(ev.finish)) && process.env.MADAO_DUMP_FRAMES === '1') {
+        chatLog('RAW_FINISH ' + JSON.stringify(ev.raw).slice(0, 600))
       }
       if (ev.finish) finish = ev.finish
       if (ev.usage) usage = ev.usage
@@ -1084,6 +1092,7 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) })
   res.end(body)
 }
+
 
 
 

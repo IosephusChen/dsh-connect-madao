@@ -122,6 +122,12 @@ export function syncPatch(path: string, models: ModelInfo[]): SyncResult {
     const next = renderPatch(models)
     const prev = existsSync(path) ? readFileSync(path, 'utf8') : ''
     if (prev === next) return { changed: false, path, models: models.length }
+
+    // 内容不同就重写。这里**不能**做"看起来差不多就跳过"的优化：
+    // npm 包自带一份构建时的 cordis.patch.yml，每次 `pnpm add` 安装
+    // 新版本都会用它覆盖运行时生成的那份。如果那份模板过期（比如上游
+    // 新增了思考档位），就会退化成"模型没有档位"，DSH 报
+    // UNSUPPORTED_REASONING_EFFORT。
     writeFileSync(path, next, 'utf8')
     return { changed: true, path, models: models.length }
   } catch (e) {
