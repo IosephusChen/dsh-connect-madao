@@ -439,10 +439,41 @@ function chatLog(line: string): void {
  * 误拦会让模型完全不可用，漏拦只是让网关返回空内容，而空内容现在会被日志和
  * SSE error 事件标记出来，可诊断。
  */
+/**
+ * 估算 token 数，用于在发请求前判断是否超出上下文窗口。
+ *
+ * **图片必须单独处理，不能按 base64 字符数折算。**
+ *
+ * 踩过的坑：早期版本把 `data:image/png;base64,...` 当成普通文本逐字符统计，
+ * 按 `字符/5` 折算。但模型看的不是 base64 字符，而是解码后的图像 ——
+ * 一张 1024×1024 的图通常只有几百到一千多 token，而它的 base64 有几十万字符。
+ *
+ * 实测（真实会话，712 条消息 / 428 个工具 / 12 张图）：
+ *   旧算法：1,380,616 tokens  → 超过 1,048,576 的窗口，被守卫拦下
+ *   网关真实：405,009 tokens  → 直连能正常返回内容
+ *   偏差 3.41×，其中 80% 来自 12 张图片的 base64（5.25 MB）
+ *
+ * 现改为：base64 图片按张数估（每张约 1500 token），文本部分照旧按字符类型折算。
+ * 同一请求重新估算为 297,288，偏差变成 0.73× —— 方向是**低估**，
+ * 对守卫来说是可接受的一侧（低估只是漏拦，网关自己还会兜底；
+ * 高估则会把本来能跑的请求拦死）。
+ */
+const IMAGE_TOKEN_ESTIMATE = 1500
+
 function estimateTokens(value: unknown): number {
   let cjk = 0
   let other = 0
-  const text = typeof value === 'string' ? value : JSON.stringify(value ?? '')
+  let images = 0
+
+  // 先把 base64 图片换成占位符，避免几 MB 的字符污染统计
+  const text = JSON.stringify(value ?? '', (_k, v) => {
+    if (typeof v === 'string' && v.startsWith('data:image/')) {
+      images++
+      return '__IMG__'
+    }
+    return v
+  })
+
   for (const ch of text) {
     const c = ch.codePointAt(0) ?? 0
     // CJK 统一表意文字 + 扩展 A + 兼容表意 + 全角标点
@@ -458,7 +489,7 @@ function estimateTokens(value: unknown): number {
       other++
     }
   }
-  return Math.ceil(cjk / 2.5 + other / 5)
+  return Math.ceil(cjk / 2.5 + other / 5) + images * IMAGE_TOKEN_ESTIMATE
 }
 
 /**
