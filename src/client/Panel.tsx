@@ -200,6 +200,33 @@ export function CodeArtsPanel({ t }: PanelProps) {
     }
   }, [checkinBusy, loadAccount])
 
+  /**
+   * 领全部可领的签到类活动（含 claim 后的 confirm）。
+   *
+   * 与 doCheckin 分开：那个的语义是「签今天的到」，这个才会把
+   * 「创新赛签到礼」之类限时活动的额度也一起领掉。仍然只在用户点击时发。
+   */
+  const doClaimAll = useCallback(async () => {
+    if (checkinBusy) return
+    setCheckinBusy(true)
+    try {
+      const r = await bridgePost<any>('/diag/checkin/all', {}, 90_000)
+      const got = Array.isArray(r?.claimed) ? r.claimed.length : 0
+      setCheckin({
+        ok: true,
+        available: true,
+        claimAll: r,
+        reason: got > 0 ? t('checkin.allGot', { n: got }) : t('checkin.allNone'),
+      })
+      void loadAccount()
+      void loadCheckin()
+    } catch (e) {
+      setCheckin({ ok: false, reason: String((e as Error)?.message ?? e) })
+    } finally {
+      setCheckinBusy(false)
+    }
+  }, [checkinBusy, loadAccount, loadCheckin, t])
+
   useEffect(() => {
     void loadAccount()
     void loadCheckin()
@@ -525,6 +552,22 @@ export function CodeArtsPanel({ t }: PanelProps) {
                     </span>
                   </>
                 ) : null}
+
+                {/* 积分到期预警：上游按批次清零，不提醒就只会某天突然发现少了。
+                    level 由 credit-expiry.ts 算好（urgent/warn/info），这里只上色。 */}
+                {acct.creditExpiry ? (
+                  <>
+                    <span style={S.detailKey}>{t('checkin.expiring')}</span>
+                    <span
+                      style={{
+                        ...S.detailVal,
+                        color: acct.creditExpiry.level === 'urgent' || acct.creditExpiry.level === 'warn' ? '#d1242f' : '#d29922',
+                      }}
+                    >
+                      {acct.creditExpiry.message}
+                    </span>
+                  </>
+                ) : null}
               </div>
             ) : (
               <div style={S.hint}>{t('account.noState')}</div>
@@ -537,7 +580,16 @@ export function CodeArtsPanel({ t }: PanelProps) {
             {checkin && checkin.available !== false ? (
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <span style={{ flex: 1, fontSize: 12 }}>
-                  {checkin.status === "CLAIMED" || checkin.status === "CONFIRMED"
+                  {/*
+                    上游四态：ELIGIBLE → CLAIMED → CONFIRMED → CONSUMED。
+                    后三者都表示「今天签过了」，只是阶段不同：
+                      CLAIMED   已领取（还没 confirm，积分已到账）
+                      CONFIRMED 已到账
+                      CONSUMED  补贴已用完（当天用过码道就会变成这个）
+                    0.9.2 之前只认前两个，导致当天用过码道后面板显示
+                    「暂无可领取的签到奖励」，看起来像没签到 —— 实测踩到。
+                  */}
+                  {checkin.status === "CLAIMED" || checkin.status === "CONFIRMED" || checkin.status === "CONSUMED"
                     ? t("checkin.done", { n: checkin.amount ?? 100 })
                     : checkin.claimable
                       ? t("checkin.available", { n: checkin.pendingAmount ?? 100 })
@@ -548,6 +600,11 @@ export function CodeArtsPanel({ t }: PanelProps) {
                     {checkinBusy ? t("checkin.doing") : t("checkin.claim")}
                   </button>
                 ) : null}
+                {/* 「领全部」：把限时签到活动（如创新赛签到礼）的额度也一起领掉，
+                    与上面的「领取」区分 —— 那个只签今天的到。 */}
+                <button style={S.btn(false)} onClick={() => void doClaimAll()} disabled={checkinBusy}>
+                  {checkinBusy ? t("checkin.allDoing") : t("checkin.all")}
+                </button>
               </div>
             ) : (
               <div style={S.hint}>{checkin?.reason ?? t("checkin.unavailable")}</div>

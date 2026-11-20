@@ -9,10 +9,9 @@
  * 只监听 127.0.0.1。
  */
 
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 import { MadaoClient } from './client.ts'
@@ -22,6 +21,11 @@ import { makeChunk, parseUpstreamEvent, sseLine, SSE_DONE } from './protocol/sse
 import { DEFAULT_CRED_PATH, candidateCredentials, loadCredentials, maskKey, migratePlaintextToEncrypted, saveCredentials, type LoadResult } from './credentials.ts'
 import { FALLBACK_MODELS, type ModelInfo } from './models.ts'
 import { parseStsIdentity } from './identity.ts'
+import { evaluateExpiry } from './credit-expiry.ts'
+import { claimAllCheckins, claimCheckin, queryCheckin, type CheckinState } from './checkin.ts'
+import { chatLog, logDir } from './protocol/log.ts'
+
+export { chatLog }
 
 export interface ServerOptions {
   port?: number
@@ -197,70 +201,47 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
     return json(res, 200, await runSelfTest(ctx))
   }
 
-  // 每日签到：查询状态（GET，安全）与执行领取（POST，一天只有一次）
+  // 福利/签到：查询状态（GET，安全）与执行领取（POST，一天只有一次）
   //
   // 接口是从码道客户端抓出来的（extension.js 里 welfareClaimUrl 拼的是
   // ${policyCenterDomain}/v1/ops/claim，policyCenterDomain 就是网关域名）：
   //   列表  GET  /v1/ops/delivery?channel=IDE
-  //   领取  POST /v1/ops/claim  { campaignId, idempotentKey, channel:"IDE" }
-  // 每日签到固定是 campaignId=34（USER_LOGIN / MANUAL_CLAIM）。
+  //   领取  POST /v1/ops/claim    { campaignId, idempotentKey, channel:"IDE" }
+  //   确认  POST /v1/ops/confirm  { campaignId }   ← claim 之后必须补这一步
+  //
+  // 具体逻辑在 checkin.ts（白名单、多活动、confirm 都在那儿），这里只做
+  // 路由和错误包装 —— 那边要能被单元测试直接 import，不能绑在 HTTP 上。
   if (url.pathname === '/diag/checkin' && (req.method === 'GET' || req.method === 'POST')) {
     await ensureFreshClient(ctx)
     if (!ctx.client) {
       return json(res, 503, { error: { message: ctx.loadError ?? '凭证未加载', type: 'credentials_error' } })
     }
     try {
-      const d = (await ctx.client.getJson('/v1/ops/delivery?channel=IDE')) as any
-      const items: any[] = d?.data?.items ?? []
-      const daily = items.find((x) => x?.campaignId === 34)
-      if (!daily) {
-        return json(res, 200, {
-          ok: true,
-          available: false,
-          reason: '网关的福利列表里没有每日签到活动（campaignId=34）',
-        })
-      }
-
-      const state = {
-        campaignId: 34,
-        title: daily.title,
-        status: daily.status,
-        claimable: daily.claimable === true,
-        pendingAmount: daily.pendingTotalAmount ?? 0,
-        unit: daily.benefitUnit ?? 'CREDIT',
-        expireAt: daily.expireAt ?? null,
-      }
-
       // GET 只查不领 —— 签到一天一次，绝不因为"打开了面板"就替用户点掉
-      if (req.method === 'GET') {
-        return json(res, 200, { ok: true, available: true, ...state })
-      }
-
-      if (!state.claimable || daily.status !== 'ELIGIBLE') {
-        return json(res, 200, { ok: true, available: true, claimed: false, ...state, reason: '当前不可领取' })
-      }
-
-      const r = (await ctx.client.postJson('/v1/ops/claim', {
-        campaignId: 34,
-        idempotentKey: randomUUID(),
-        channel: 'IDE',
-      })) as any
-      const claimed = r?.code === 0
-      chatLog(`checkin ${claimed ? 'OK' : 'FAIL'} campaign=34 ${JSON.stringify(r?.data ?? r).slice(0, 200)}`)
-      return json(res, 200, {
-        ok: true,
-        available: true,
-        claimed,
-        ...state,
-        status: r?.data?.status ?? state.status,
-        amount: r?.data?.totalAmount ?? state.pendingAmount,
-        claimedAt: r?.data?.claimedAt ?? null,
-        ...(claimed ? {} : { reason: String(r?.message ?? '领取失败') }),
-      })
+      const state: CheckinState =
+        req.method === 'GET' ? await queryCheckin(ctx.client) : await claimCheckin(ctx.client)
+      return json(res, 200, state)
     } catch (e) {
       chatLog(`checkin ERROR ${String((e as Error)?.message ?? e).slice(0, 200)}`)
       return json(res, 502, {
         error: { message: `签到接口调用失败：${String((e as Error)?.message ?? e)}`, type: 'checkin_error' },
+      })
+    }
+  }
+
+  // 领取**所有**可领的签到类活动（含 confirm），面板上是另一个按钮。
+  // 与 /diag/checkin 分开：那个的语义是「签今天的到」，这个才是「全部领一遍」。
+  if (req.method === 'POST' && url.pathname === '/diag/checkin/all') {
+    await ensureFreshClient(ctx)
+    if (!ctx.client) {
+      return json(res, 503, { error: { message: ctx.loadError ?? '凭证未加载', type: 'credentials_error' } })
+    }
+    try {
+      return json(res, 200, await claimAllCheckins(ctx.client))
+    } catch (e) {
+      chatLog(`checkin/all ERROR ${String((e as Error)?.message ?? e).slice(0, 200)}`)
+      return json(res, 502, {
+        error: { message: `批量签到失败：${String((e as Error)?.message ?? e)}`, type: 'checkin_error' },
       })
     }
   }
@@ -405,20 +386,6 @@ async function handle(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Prom
  * 2. 思考强度：DSH / OpenAI 侧用 `reasoning_effort`，
  *    码道上游用 `strength`，这里统一映射。
  */
-/**
- * 对话请求日志。只记元数据，不记消息内容。
- *
- * 空响应（`EMPTY_RESPONSE`）这类问题，光看 DSH 的报错完全定位不了：
- * 可能是显示名没还原、max_tokens 太小、或者上游限流。把实际发出去的
- * model / 强度 / 预算记下来，下次一眼就能看出是哪一类。
- */
-function chatLog(line: string): void {
-  try {
-    const dir = join(homedir(), '.dsh-connect-madao')
-    mkdirSync(dir, { recursive: true })
-    appendFileSync(join(dir, 'chat.log'), `${new Date().toISOString()} ${line}\n`, 'utf8')
-  } catch {}
-}
 
 /**
  * 粗估一段内容的 token 数。
@@ -680,7 +647,7 @@ async function chatCompletion(res: ServerResponse, client: MadaoClient, rawBody:
       // 把被拦下的请求体落盘，便于事后用真实请求直接打网关复核估算是否准确。
       // 只保留最后一次，避免堆积。
       try {
-        writeFileSync(join(homedir(), '.dsh-connect-madao', 'last-rejected.json'), JSON.stringify(rawBody), 'utf8')
+        writeFileSync(join(logDir(), 'last-rejected.json'), JSON.stringify(rawBody), 'utf8')
         chatLog('chat REJECT 请求体已存至 ~/.dsh-connect-madao/last-rejected.json')
       } catch {}
       // 工具定义往往是主要占用。如果光 tools 就超窗口，那就不是"压缩会话"能解决的，
@@ -951,16 +918,51 @@ export interface CreditInfo {
   onDemand?: { amount: number; used: number; remain: number }
   /** 累计消耗 token */
   totalTokens?: number
+  /**
+   * 即将到期的积分数量（上游 package_credit_expiring_amount）。
+   *
+   * 体验版 / 活动赠送的积分按批次到期、过期即清零，这是唯一能提前知道
+   * 「有多少积分要作废」的信号。
+   */
+  expiringAmount?: number
+  /** 套餐周期（上游顶层 start_date / end_date，YYYY-MM-DD） */
+  packageStart?: string
+  packageEnd?: string
 }
 
 function pickMetric(list: any[], name: string): any | undefined {
   return list.find((m) => m?.name === name)
 }
 
+/**
+ * 从汇总指标里取「即将到期」的积分。
+ *
+ * 上游只在 usageTotalPackageCredit / usageBonusPackageCredit 上带
+ * package_credit_expiring_amount，分项指标（basic / onDemand）没有。
+ * 2026-11-20 实测两者报的是**同一个值**（33.54，同一批积分），
+ * 所以取首个命中就返回 —— 累加会翻倍。
+ *
+ * 取不到就当 0，绝不因为一个可选字段把整个额度查询打成失败。
+ */
+export function pickExpiring(list: any[]): number {
+  for (const name of ['usageTotalPackageCredit', 'usageBonusPackageCredit']) {
+    const m = pickMetric(list, name)
+    if (m && m.package_credit_expiring_amount != null) {
+      const n = Number(m.package_credit_expiring_amount)
+      if (Number.isFinite(n) && n > 0) return n
+    }
+  }
+  return 0
+}
+
 /** 读积分额度。失败返回 null，不影响其它诊断项。 */
 async function queryCredit(client: MadaoClient): Promise<CreditInfo | null> {
   try {
-    const r = (await client.getJson('/snap-manager/v1/statistics/plugin')) as { metrics?: any[] }
+    const r = (await client.getJson('/snap-manager/v1/statistics/plugin')) as {
+      metrics?: any[]
+      start_date?: unknown
+      end_date?: unknown
+    }
     const list = r?.metrics ?? []
     const total = pickMetric(list, 'usageTotalPackageCredit')
     if (!total) return null
@@ -975,6 +977,11 @@ async function queryCredit(client: MadaoClient): Promise<CreditInfo | null> {
       bonus: pkg(pickMetric(list, 'usageBonusPackageCredit')),
       onDemand: pkg(pickMetric(list, 'usageOnDemandPackageCredit')),
       totalTokens: tokens ? Number(tokens.usage_token_num ?? 0) : undefined,
+      // package_credit_expiring_amount 只在两个「汇总」指标上出现，
+      // 分项指标（basic / onDemand）没有这个字段，所以取汇总那份。
+      expiringAmount: pickExpiring(list),
+      packageStart: typeof r?.start_date === 'string' ? r.start_date : undefined,
+      packageEnd: typeof r?.end_date === 'string' ? r.end_date : undefined,
     }
   } catch {
     return null
@@ -1026,7 +1033,13 @@ async function accountInfo(ctx: Ctx): Promise<unknown> {
     base.sessionKey = { keyId: key.keyId, ttlSec: Math.round((key.expiresAt - Date.now()) / 1000) }
 
     const credit = await queryCredit(ctx.client)
-    if (credit) base.credit = credit
+    if (credit) {
+      base.credit = credit
+      // 到期预警：expiringAmount 是上游给的「即将到期」数量，
+      // 这个字段以前完全没被读，导致积分悄悄清零都没人知道。
+      const notice = evaluateExpiry(credit)
+      if (notice.level !== 'none') base.creditExpiry = notice
+    }
 
     // 角色信息拿不到也无所谓，纯展示
     try {

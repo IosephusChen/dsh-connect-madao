@@ -11,10 +11,11 @@
 | 部分 | 状态 |
 |---|---|
 | 协议逆向 | ✅ 全部实测确认 |
-| 密码层（ECDH / SM4-GCM / 签名） | ✅ 单测 7 项通过 |
+| 密码层（ECDH / SM4-GCM / 签名） | ✅ 单测 18 项通过 |
 | 凭证（AK/SK → 自动换 STS） | ✅ 端到端验证 |
 | OpenAI 兼容 HTTP 服务 | ✅ 流式 + 非流式均验证 |
-| 前端设置面板 | ✅ 构建通过（19.5KB bundle） |
+| 福利活动（签到 / 确认 / 到期预警） | ✅ 单测 38 项通过 |
+| 前端设置面板 | ✅ 构建通过（50.4KB bundle） |
 | 输入框状态胶囊 | ✅ 构建通过 |
 
 **已实测打通**：`doctor` 四步全绿，HTTP 流式返回 `reasoning_content` + `content` + `[DONE]`，非流式返回完整 JSON。
@@ -227,6 +228,20 @@ lib/              构建产物
 ## 侦察记录
 
 见 [`../RECON.md`](../RECON.md)。
+
+---
+
+## 致谢
+
+- **[@vzhentian1-design](https://github.com/vzhentian1-design)** —— 0.9.2 的
+  `POST /v1/ops/confirm` 补全、多活动扫描 + `type`/`triggerEvent` 白名单、
+  积分到期预警，以及 `LICENSE`，均来自他的
+  [PR #1](https://github.com/XLNC-L/dsh-connect-madao/pull/1)。
+  四态状态机 `ELIGIBLE → CLAIMED → CONFIRMED → CONSUMED` 和
+  「`confirm` 只认 `{campaignId}`、多带 `channel` 会 `400 HDN.1000`」
+  这两条协议事实也是他先实测出来的。
+
+变更明细见 [CHANGELOG.md](./CHANGELOG.md)。
 
 
 
