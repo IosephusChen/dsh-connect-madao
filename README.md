@@ -91,6 +91,12 @@ node lib/bin.js models        # 打印网关当前模型清单
 node lib/bin.js models --write # 顺手把清单写回 patch
 ```
 
+### 远程打开 DSH 网页
+
+设置面板和输入框状态胶囊通过 DSH 当前页面的同源 `/api/madao-bridge` 发请求，DSH 在认证后把允许的设置和诊断操作转发到宿主机上的本地桥接。远程浏览器不再访问自己机器上的 `127.0.0.1:8765`，也不需要把桥接端口开放到网络。
+
+需要 DSH Web Host 支持 `connection.fetch.register` 的精确 API 路由；接口已按 DSH 0.2.2-rc.5 核对。通过远程网页保存 AK/SK 前请使用可信的 HTTPS 入口；凭证保存在运行 DSH 的机器上。
+
 ### 4. 手动接入（不走插件）
 
 如果不装插件，只要本地服务：

@@ -19,13 +19,14 @@ import { StsProvider } from './sts-provider.ts'
 import { MadaoClient } from './client.ts'
 import { discoverModels, FALLBACK_MODELS, type ModelInfo } from './models.ts'
 import { syncPatch } from './host-patch.ts'
+import { registerRemoteBridge } from './remote-bridge.ts'
 import { appendFileSync, mkdirSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 export const name = 'dsh-connect-madao'
-export const inject: string[] = []
+export const inject: string[] = ['connection']
 
 export const PROVIDER = 'madao'
 
@@ -74,6 +75,7 @@ export function apply(ctx: any, config: MadaoConfig = {}): void {
   }
 
   const port = config.port ?? 8765
+  registerRemoteBridge(ctx, port)
   let server: RunningServer | undefined
 
   if (config.ak && config.sk) {
