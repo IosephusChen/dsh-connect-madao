@@ -52,6 +52,52 @@ test('Host proxies a real local GET and POST with only the JSON headers', { time
   ])
 })
 
+test('Host refuses to read or forward until its own bridge is ready and after it stops', async () => {
+  let ready = false
+  let calls = 0
+  const handler = createRemoteBridgeHandler({
+    isReady: () => ready,
+    fetchImpl: async () => { calls++; return Response.json({ ok: true }) },
+  })
+  const credentials = { method: 'POST', path: '/diag/credentials', body: { fixture: 'test-only' } }
+  const pendingRequest = post(credentials)
+  assert.equal((await handler(pendingRequest)).status, 503)
+  assert.equal(pendingRequest.bodyUsed, false)
+  assert.equal(calls, 0)
+
+  ready = true
+  assert.equal((await handler(pendingRequest)).status, 200)
+  assert.equal(calls, 1)
+
+  ready = false
+  assert.equal((await handler(post(credentials))).status, 503)
+  assert.equal(calls, 1)
+})
+
+test('Host refuses to forward when its bridge stops while reading a request', async () => {
+  let ready = true
+  let calls = 0
+  const handler = createRemoteBridgeHandler({
+    isReady: () => ready,
+    fetchImpl: async () => { calls++; return Response.json({ ok: true }) },
+  })
+  const { readable, writable } = new TransformStream<Uint8Array>()
+  const writer = writable.getWriter()
+  const init: RequestInit & { duplex: 'half' } = {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: readable, duplex: 'half',
+  }
+  const request = new Request('http://dsh.invalid/api/madao-bridge', init)
+  const response = handler(request)
+  assert.equal(request.bodyUsed, true)
+  ready = false
+  await writer.write(new TextEncoder().encode(JSON.stringify({
+    method: 'POST', path: '/diag/credentials', body: { fixture: 'test-only' },
+  })))
+  await writer.close()
+  assert.equal((await response).status, 503)
+  assert.equal(calls, 0)
+})
+
 test('Host rejects unlisted operations, non-JSON types, and invalid request bodies before fetching', async () => {
   let calls = 0
   const handler = createRemoteBridgeHandler({ fetchImpl: async () => { calls++; return Response.json({ ok: true }) } })
@@ -130,6 +176,34 @@ test('Host registration uses the scoped exact POST route and returns its dispose
   assert.equal((await route?.fetch(post({ method: 'GET', path: '/not-allowed' })))?.status, 404)
   await dispose()
   assert.equal(routes.size, 0)
+})
+
+test('Client prefers the shell transport for a Host on a different origin', async t => {
+  const page = globalThis as typeof globalThis & { __DSH_TRANSPORT__?: { fetch?: typeof fetch } }
+  const prior = Object.getOwnPropertyDescriptor(page, '__DSH_TRANSPORT__')
+  t.after(() => {
+    if (prior) Object.defineProperty(page, '__DSH_TRANSPORT__', prior)
+    else delete page.__DSH_TRANSPORT__
+  })
+  const nativeFetch = t.mock.method(globalThis, 'fetch', async () => {
+    throw new Error('request should use the DSH shell transport')
+  })
+  let calls = 0
+  Object.defineProperty(page, '__DSH_TRANSPORT__', {
+    configurable: true,
+    value: {
+      async fetch(path: string, init: RequestInit) {
+        calls++
+        assert.equal(path, 'api/madao-bridge')
+        assert.equal(new URL(path, 'https://host.example/dsh/').href, 'https://host.example/dsh/api/madao-bridge')
+        assert.deepEqual(JSON.parse(String(init.body)), { method: 'GET', path: '/healthz' })
+        return Response.json({ ok: true })
+      },
+    },
+  })
+  assert.deepEqual(await bridgeJson('/healthz'), { ok: true })
+  assert.equal(calls, 1)
+  assert.equal(nativeFetch.mock.callCount(), 0)
 })
 
 test('Client uses the same-origin mount-relative route and reports errors and aborts', { timeout: 5000 }, async t => {

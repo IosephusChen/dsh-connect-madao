@@ -1,6 +1,10 @@
 /** Relative to the authenticated DSH page, including a reverse-proxy mount prefix. */
 const BRIDGE_ROUTE = 'api/madao-bridge'
 
+type DshPageGlobals = typeof globalThis & {
+  __DSH_TRANSPORT__?: { fetch?: (input: string | URL, init?: RequestInit) => Promise<Response> }
+}
+
 /** 带超时的 JSON 请求，失败抛错而不是静默返回 null。 */
 export async function bridgeJson<T>(path: string, timeoutMs = 8000): Promise<T> {
   return request<T>('GET', path, undefined, timeoutMs)
@@ -15,7 +19,8 @@ async function request<T>(method: 'GET' | 'POST', path: string, body: unknown, t
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
   try {
-    const res = await fetch(BRIDGE_ROUTE, {
+    const transportFetch = (globalThis as DshPageGlobals).__DSH_TRANSPORT__?.fetch ?? globalThis.fetch
+    const res = await transportFetch(BRIDGE_ROUTE, {
       method: 'POST',
       mode: 'same-origin',
       credentials: 'same-origin',

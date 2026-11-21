@@ -75,32 +75,25 @@ export function apply(ctx: any, config: MadaoConfig = {}): void {
   }
 
   const port = config.port ?? 8765
-  registerRemoteBridge(ctx, port)
   let server: RunningServer | undefined
+  let disposed = false
+  registerRemoteBridge(ctx, port, () => !disposed && server?.server.listening === true)
 
   if (config.ak && config.sk) {
     process.env.MADAO_AK = config.ak
     process.env.MADAO_SK = config.sk
   }
 
-  // 生命周期绑定：不因 effect 用法差异导致整个 apply 抛错
-  try {
-    if (typeof ctx?.effect === 'function') {
-      ctx.effect(
-        () => () => {
-          void server?.close().catch(() => {})
-          server = void 0
-          diag('disposed')
-        },
-        'dsh-connect-madao: local OpenAI bridge',
-      )
-      diag('ctx.effect registered')
-    } else {
-      diag('ctx.effect unavailable (no disposal hook)')
-    }
-  } catch (err) {
-    diag(`ctx.effect threw: ${String(err)}`)
-  }
+  ctx.effect(
+    () => async () => {
+      disposed = true
+      const running = server
+      server = undefined
+      await running?.close().catch(() => {})
+      diag('disposed')
+    },
+    'dsh-connect-madao: local OpenAI bridge',
+  )
 
   // 启动时拉一次清单并写回 patch。失败一律降级，绝不阻断桥接服务。
   const syncModels = async (): Promise<ModelInfo[]> => {
@@ -132,6 +125,7 @@ export function apply(ctx: any, config: MadaoConfig = {}): void {
   void (async () => {
     try {
       const models = await syncModels()
+      if (disposed) return
 
       let hint = '未配置（请求会返回 503）'
       try {
@@ -140,8 +134,14 @@ export function apply(ctx: any, config: MadaoConfig = {}): void {
       } catch (err) {
         diag(`loadCredentials failed: ${String(err)}`)
       }
+      if (disposed) return
 
-      server = await startServer({ port, host: '127.0.0.1', gateway: config.gateway, models })
+      const started = await startServer({ port, host: '127.0.0.1', gateway: config.gateway, models })
+      if (disposed) {
+        await started.close()
+        return
+      }
+      server = started
       diag(`bridge ready at ${server.url}/v1 (models=${models.length}, credentials: ${hint})`)
     } catch (err) {
       diag(`bridge failed to start: ${String((err as Error)?.stack ?? err)}`)

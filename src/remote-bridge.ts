@@ -64,13 +64,20 @@ async function readJsonText(message: Request | Response, maxBytes: number): Prom
   }
 }
 
+type RemoteBridgeOptions = {
+  port?: number
+  fetchImpl?: typeof globalThis.fetch
+  isReady?: () => boolean
+}
+
 /** Forward only known settings operations to the same host's loopback bridge. */
-export function createRemoteBridgeHandler({ port = 8765, fetchImpl = globalThis.fetch } = {}) {
+export function createRemoteBridgeHandler({ port = 8765, fetchImpl = globalThis.fetch, isReady = () => true }: RemoteBridgeOptions = {}) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new RangeError('invalid local bridge port')
   const base = `http://127.0.0.1:${port}`
 
   return async (request: Request): Promise<Response> => {
     if (request.method !== 'POST') return jsonError('method not allowed', 405)
+    if (!isReady()) return jsonError('local bridge is not ready', 503)
     if (!isJson(request.headers)) return jsonError('content type must be application/json', 415)
 
     let payload: unknown
@@ -91,6 +98,8 @@ export function createRemoteBridgeHandler({ port = 8765, fetchImpl = globalThis.
       return jsonError('bridge body must be a JSON object for POST and omitted for GET', 400)
     }
 
+    // The plugin can unload while the client's streaming body is being read.
+    if (!isReady()) return jsonError('local bridge is not ready', 503)
     let upstream: Response | undefined
     try {
       request.signal.throwIfAborted()
@@ -130,12 +139,12 @@ export function createRemoteBridgeHandler({ port = 8765, fetchImpl = globalThis.
 }
 
 /** DSH provides admission, owner authorization, and Context-scoped disposal. */
-export function registerRemoteBridge(ctx: RemoteBridgeContext, port = 8765): () => Promise<void> {
+export function registerRemoteBridge(ctx: RemoteBridgeContext, port = 8765, isReady?: () => boolean): () => Promise<void> {
   return ctx.connection.fetch.register({
     path: ROUTE,
     methods: ['POST'],
     // Enforce this route's small byte cap before the carrier buffers the request.
     requestBody: 'streaming',
-    fetch: createRemoteBridgeHandler({ port }),
+    fetch: createRemoteBridgeHandler({ port, isReady }),
   })
 }
